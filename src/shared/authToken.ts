@@ -98,3 +98,44 @@ export const storeAuthToken = (token: unknown): boolean => {
   }
   return true;
 };
+
+// Apply a token rotated by the server via the X-Refreshed-Token response header.
+//
+// Unlike `storeAuthToken` (used by the login/refresh paths, where any valid
+// token legitimately replaces the current one), a header-borne token is only
+// accepted when it does not move the session's expiry backwards. A cached or
+// proxied response can replay a stale X-Refreshed-Token days after it was
+// issued; applying it would downgrade a valid session to an expired token, and
+// `getStoredAuthToken` would then expire the session and bounce the user to the
+// login screen on the very next API call.
+//
+// Unparseable claims on either side fall through to the permissive path so that
+// a legacy or non-standard token shape can never wedge the session.
+//
+// The comparison is `<` rather than `<=` on purpose: the server mints rotated
+// tokens with a *sliding* expiry (auth.middleware.ts signs with
+// `expiresIn: '7d'`) and only rotates past half-life, so a genuine rotation
+// always carries a strictly later exp — rejecting equal-exp tokens would buy no
+// protection while failing a same-expiry re-issue. If upstream ever switches to
+// an absolute session deadline, every rotation inherits the same exp; compare
+// `issuedAt` instead of `expiresAt` in that case.
+//
+// NOTE: the guard must stay out of `storeAuthToken` itself. `AuthContext`'s
+// token persistence and the login path (`setSession`) both go through that
+// function, so a freshness check there would reject a different user's login.
+// Only the header-borne replay paths are guarded.
+export const storeRotatedAuthToken = (token: unknown): boolean => {
+  if (!isValidRefreshedToken(token)) {
+    return false;
+  }
+
+  // Read the raw item rather than `getStoredAuthToken()`, which expires the
+  // session as a side effect when the held token is already past its deadline.
+  const currentClaims = readTokenClaims(localStorage.getItem('auth-token'));
+  const rotatedClaims = readTokenClaims(token);
+  if (currentClaims && rotatedClaims && rotatedClaims.expiresAt < currentClaims.expiresAt) {
+    return false;
+  }
+
+  return storeAuthToken(token);
+};

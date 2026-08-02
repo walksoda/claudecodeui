@@ -144,6 +144,15 @@ app.get('/health', (req, res) => {
     });
 });
 
+// Never let the browser cache API responses. A cached /api response can be
+// replayed on reload carrying a stale X-Refreshed-Token header, which the
+// client would write back into localStorage — downgrading a valid session to
+// an expired token and bouncing the user to the login screen.
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+});
+
 // Optional API key validation (if configured)
 app.use('/api', validateApiKey);
 
