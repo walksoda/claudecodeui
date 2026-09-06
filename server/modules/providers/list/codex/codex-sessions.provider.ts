@@ -70,6 +70,30 @@ function isVisibleCodexUserMessage(payload: AnyRecord | null | undefined): boole
 }
 
 /**
+ * Codex >=0.148 stopped emitting `user_message` events and now records the
+ * prompt the user typed as an `item_completed` event whose item is a
+ * `UserMessage`. Returns that item so callers can read its `content` array;
+ * the older payload shape stays handled by `isVisibleCodexUserMessage` so
+ * rollouts written by earlier Codex versions keep rendering.
+ *
+ * Exported for tests.
+ */
+export function readCodexCompletedUserMessageItem(
+  payload: AnyRecord | null | undefined,
+): AnyRecord | null {
+  if (!payload || payload.type !== 'item_completed') {
+    return null;
+  }
+
+  const item = readObjectRecord(payload.item);
+  if (!item || item.type !== 'UserMessage') {
+    return null;
+  }
+
+  return item;
+}
+
+/**
  * Follows which turn a Codex rollout is inside as its rows stream past.
  *
  * Codex writes no per-row id — every line is `{timestamp, type, payload}` and
@@ -160,7 +184,7 @@ async function readCodexLiveTurnIds(filePath: string): Promise<string[]> {
 }
 
 /**
- * Reads the image attachments Codex records on `user_message` events.
+ * Reads the image attachments Codex records on user turns.
  * Turns sent with `local_image` input items land in `local_images` as file
  * paths (verified against real rollout JSONL); the `images` array can carry
  * base64 data URLs, which are passed through as inline `data` attachments so
@@ -178,6 +202,16 @@ export function extractCodexUserImages(
   const candidates = [
     ...(Array.isArray(payload.local_images) ? payload.local_images : []),
     ...(Array.isArray(payload.images) ? payload.images : []),
+    // `UserMessage` items (Codex >=0.148) carry attachments inline in
+    // `content` as `local_image` entries instead of a sibling array.
+    ...(Array.isArray(payload.content)
+      ? payload.content
+        .map((entry) => {
+          const record = readObjectRecord(entry);
+          return record?.type === 'local_image' ? record.path : undefined;
+        })
+        .filter((entry): entry is string => typeof entry === 'string')
+      : []),
   ];
 
   const attachments: Array<{ path?: string; data?: string }> = [];
@@ -1309,6 +1343,30 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
 
       if (payload.type === 'context_compacted') {
         messages.push({ type: 'status_note', timestamp, content: 'Context compacted' });
+        continue;
+      }
+
+      // Codex >=0.148 writes the same prompt as an `item_completed`
+      // `UserMessage` item. It is anchored exactly like the legacy shape below:
+      // a turn is addressable regardless of which Codex version wrote it. The
+      // two branches cannot double-count — no rollout carries both shapes.
+      const completedUserItem = readCodexCompletedUserMessageItem(payload);
+      if (completedUserItem) {
+        const userText = extractCodexTextContent(completedUserItem.content);
+        if (userText.trim()) {
+          const turnId = turns.getCurrentTurnId();
+          const isFirstPromptOfTurn = Boolean(turnId) && !anchoredTurnIds.has(turnId as string);
+          if (isFirstPromptOfTurn) {
+            anchoredTurnIds.add(turnId as string);
+          }
+          messages.push({
+            type: 'user',
+            timestamp,
+            message: { role: 'user', content: userText },
+            images: extractCodexUserImages(completedUserItem),
+            ...(isFirstPromptOfTurn ? { turnId } : {}),
+          });
+        }
         continue;
       }
 

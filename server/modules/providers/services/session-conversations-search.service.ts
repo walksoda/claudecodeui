@@ -1021,6 +1021,25 @@ function isVisibleCodexUserMessage(payload: AnyRecord | null | undefined): boole
   return typeof payload.message === 'string' && payload.message.trim().length > 0;
 }
 
+/**
+ * Codex >=0.148 records user turns as `item_completed` events carrying a
+ * `UserMessage` item rather than the older `user_message` payload. Returns
+ * the item's text so search keeps indexing user turns on both rollout shapes.
+ */
+function readCodexCompletedUserMessageText(payload: AnyRecord | null | undefined): string | null {
+  if (!payload || payload.type !== 'item_completed') {
+    return null;
+  }
+
+  const item = payload.item as AnyRecord | undefined;
+  if (!item || typeof item !== 'object' || item.type !== 'UserMessage') {
+    return null;
+  }
+
+  const text = extractCodexText(item.content);
+  return text.trim().length > 0 ? text : null;
+}
+
 async function parseCodexSessionMatches(
   session: SearchableSessionRow,
   runtime: SearchRuntime,
@@ -1050,9 +1069,15 @@ async function parseCodexSessionMatches(
 
       let text: string | null = null;
       let role: 'user' | 'assistant' | null = null;
+      const completedUserText = entry.type === 'event_msg'
+        ? readCodexCompletedUserMessageText(entry.payload as AnyRecord)
+        : null;
 
       if (entry.type === 'event_msg' && isVisibleCodexUserMessage(entry.payload as AnyRecord)) {
         text = String(entry.payload.message);
+        role = 'user';
+      } else if (completedUserText) {
+        text = completedUserText;
         role = 'user';
       } else if (
         entry.type === 'event_msg'

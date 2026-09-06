@@ -551,3 +551,69 @@ test('an exec script that updates the plan yields the steps it set', () => {
     ],
   }]);
 });
+
+test('Codex history renders user turns recorded as item_completed UserMessage items', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-user-item-history-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    const providerSessionId = 'codex-user-item-1';
+    const transcriptPath = await writeCodexTranscript(tempRoot, providerSessionId, workspacePath);
+    // Shape recorded by Codex >=0.148, which replaced the `user_message`
+    // event with an `item_completed` event carrying a `UserMessage` item.
+    const transcriptLines = [
+      JSON.stringify({ type: 'session_meta', payload: { id: providerSessionId, cwd: workspacePath } }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'UserMessage',
+            id: 'user-item-1',
+            content: [{ type: 'text', text: 'first question' }],
+          },
+        },
+      }),
+      JSON.stringify({
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'an answer' }] },
+      }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'UserMessage',
+            id: 'user-item-2',
+            content: [
+              { type: 'text', text: 'second question' },
+              { type: 'local_image', path: '/proj/shot.png' },
+            ],
+          },
+        },
+      }),
+      // Non-user items must stay out of the user stream.
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'item_completed', item: { type: 'AgentMessage', content: [{ type: 'text', text: 'ignored' }] } },
+      }),
+    ];
+    await writeFile(transcriptPath, `${transcriptLines.join('\n')}\n`, 'utf8');
+
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createAppSession('app-user-item-1', 'codex', workspacePath);
+      sessionsDb.assignProviderSessionId('app-user-item-1', providerSessionId);
+      await new CodexSessionSynchronizer().synchronize();
+
+      const history = await new CodexSessionsProvider().fetchHistory('app-user-item-1');
+      const userMessages = history.messages.filter((message) => message.role === 'user');
+      assert.deepEqual(userMessages.map((message) => message.content), ['first question', 'second question']);
+      assert.deepEqual(userMessages[1].images, [{ path: '/proj/shot.png' }]);
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});

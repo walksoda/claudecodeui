@@ -116,6 +116,25 @@ test('codex history: user_message payload images become path attachments', () =>
   assert.equal(extractCodexUserImages({ type: 'user_message', message: 'hi', images: [], local_images: [] }), undefined);
 });
 
+test('codex history: UserMessage items expose inline local_image content entries', () => {
+  // Codex >=0.148 puts attachments inside the item's `content` array rather
+  // than in a sibling `local_images` field.
+  assert.deepEqual(
+    extractCodexUserImages({
+      type: 'UserMessage',
+      content: [
+        { type: 'text', text: 'can u see attached image?' },
+        { type: 'local_image', path: '/proj/a.png' },
+      ],
+    }),
+    [{ path: '/proj/a.png' }],
+  );
+  assert.equal(
+    extractCodexUserImages({ type: 'UserMessage', content: [{ type: 'text', text: 'no images here' }] }),
+    undefined,
+  );
+});
+
 test('codex history: base64 data URLs pass through as inline data attachments', () => {
   const dataUrl = 'data:image/png;base64,QUJD';
   assert.deepEqual(
